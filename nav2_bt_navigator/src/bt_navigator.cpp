@@ -110,7 +110,9 @@ BtNavigator::on_configure(const rclcpp_lifecycle::State & /*state*/)
     get_node_clock_interface(),
     get_node_logging_interface(),
     get_node_waitables_interface(),
-    "navigate_to_pose", std::bind(&BtNavigator::navigateToPose, this));
+    "navigate_to_pose",
+    std::bind(&BtNavigator::navigateToPose, this),
+    std::bind(&BtNavigator::goalCheckerCallback, this, std::placeholders::_1));
 
   // Get the libraries to pull plugins from
   plugin_lib_names_ = get_parameter("plugin_lib_names").as_string_array();
@@ -152,11 +154,6 @@ BtNavigator::loadBehaviorTree(const std::string & bt_xml_filename)
   // Read the input BT XML from the specified file into a string
   std::ifstream xml_file(bt_xml_filename);
 
-  if (!xml_file.good()) {
-    RCLCPP_ERROR(get_logger(), "Couldn't open input XML file: %s", bt_xml_filename.c_str());
-    return false;
-  }
-
   auto xml_string = std::string(
     std::istreambuf_iterator<char>(xml_file),
     std::istreambuf_iterator<char>());
@@ -165,7 +162,20 @@ BtNavigator::loadBehaviorTree(const std::string & bt_xml_filename)
   RCLCPP_DEBUG(get_logger(), "Behavior Tree XML: %s", xml_string.c_str());
 
   // Create the Behavior Tree from the XML input
-  tree_ = bt_->createTreeFromText(xml_string, blackboard_);
+  try {
+    tree_ = bt_->createTreeFromText(xml_string, blackboard_);
+    RCLCPP_INFO(get_logger(), "Created Behavior Tree from file: '%s'", bt_xml_filename.c_str());
+  } catch (std::runtime_error & e) {
+    RCLCPP_ERROR(get_logger(), "Failed creating BT, Error: %s", e.what());
+    current_bt_xml_filename_ = "";
+    return false;
+  } catch (...) {
+    std::exception_ptr p = std::current_exception();
+    RCLCPP_ERROR(get_logger(), p ? p.__cxa_exception_type()->name() : "null");
+    current_bt_xml_filename_ = "";
+    return false;
+  }
+
   current_bt_xml_filename_ = bt_xml_filename;
 
   // get parameter for monitoring with Groot via ZMQ Publisher
@@ -177,6 +187,7 @@ BtNavigator::loadBehaviorTree(const std::string & bt_xml_filename)
       bt_->addGrootMonitoring(&tree_, zmq_publisher_port, zmq_server_port);
     } catch (const std::logic_error & e) {
       RCLCPP_ERROR(get_logger(), "ZMQ already enabled, Error: %s", e.what());
+      return false;
     }
   }
   return true;
@@ -274,7 +285,7 @@ BtNavigator::navigateToPose()
 
   if (!loadBehaviorTree(bt_xml_filename)) {
     RCLCPP_ERROR(
-      get_logger(), "BT file not found: %s. Navigation canceled. Current bt: %s",
+      get_logger(), "BT file could not be loaded: %s. Navigation canceled. Current bt: %s",
       bt_xml_filename.c_str(), current_bt_xml_filename_.c_str());
     action_server_->terminate_current();
     return;
@@ -331,6 +342,28 @@ BtNavigator::navigateToPose()
       action_server_->terminate_all();
       break;
   }
+}
+
+bool
+BtNavigator::goalCheckerCallback(std::shared_ptr<const typename Action::Goal> goal)
+{
+  if (!goal->behavior_tree.empty()) {
+    RCLCPP_INFO(
+      get_logger(), "Received goal BT: \"%s\"",
+      goal->behavior_tree.c_str());
+
+    // Check if the xml-file can be opened
+    const std::string bt_xml_filename = goal->behavior_tree.c_str();
+    std::ifstream xml_file(bt_xml_filename);
+    if (!xml_file.good()) {
+      RCLCPP_ERROR(get_logger(), "Couldn't open input XML file: %s", bt_xml_filename.c_str());
+      return false;
+    }
+  }
+
+  // Add further Goal Checks here
+
+  return true;
 }
 
 void
